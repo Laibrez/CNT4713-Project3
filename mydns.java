@@ -230,33 +230,93 @@ public class mydns {
         return null;
     }
 
-    // TODO: LAISHA Implement this method to extract domain name from RDATA for NS records
-    public static String parseNSRecord(byte[] rdata, byte[] fullResponse) {
-        // TODO: Parse domain name from NS record RDATA
-        // Note: May need to handle compression pointers
-        return null;
+   // TODO: LAISHA Implement this method to extract domain name from RDATA for NS records
+public static String parseNSRecord(byte[] rdata, byte[] fullResponse) {
+    // We parse the domain name from the NS record's RDATA
+    // Since rdata may contain a compressed pointer, we use a helper that can follow pointers into fullResponse
+    NameResult result = parseNameWithFullResponse(0, rdata, fullResponse);
+    return result.name;
+}
+
+// Private helper to parse names with compression pointers that may point into the full DNS message
+private static NameResult parseNameWithFullResponse(int index, byte[] segment, byte[] fullResponse) {
+    StringBuilder name = new StringBuilder();
+    int currentIndex = index;
+    boolean jumped = false;
+    int originalNextIndex = index;
+
+    while (true) {
+        if (currentIndex >= segment.length) break;
+
+        int labelLength = segment[currentIndex] & 0xFF;
+
+        if (labelLength == 0) {
+            // End of name
+            if (!jumped) originalNextIndex = currentIndex + 1;
+            break;
+        }
+
+        if ((labelLength & 0xC0) == 0xC0) {
+            // Compression pointer: 11xx xxxx
+            int offset = ((labelLength & 0x3F) << 8) | (segment[currentIndex + 1] & 0xFF);
+            if (!jumped) {
+                originalNextIndex = currentIndex + 2;
+                jumped = true;
+            }
+            // Follow pointer into the full DNS message
+            NameResult result = parseName(offset, fullResponse); // Use original parseName!
+            name.append(result.name);
+            return new NameResult(name.toString(), originalNextIndex);
+        } else {
+            // Regular label
+            currentIndex++;
+            String label = new String(segment, currentIndex, labelLength, StandardCharsets.UTF_8);
+            name.append(label).append(".");
+            currentIndex += labelLength;
+        }
     }
 
-    // TODO: LAISHA Implement this method to find IP address for a given domain name in Additional section
-    public static String findIPInAdditional(String domainName, List<ResourceRecord> additionals) {
-        // TODO: Search through additional records to find A record for domainName
-        // Return IP address as string, or null if not found
-        return null;
+    String resultName = name.toString();
+    if (resultName.endsWith(".")) {
+        resultName = resultName.substring(0, resultName.length() - 1);
     }
+    return new NameResult(resultName, originalNextIndex);
+}
 
-    // TODO:LAISHA Implement this method to extract NS server names from Authority section
-    public static List<String> extractNSServers(List<ResourceRecord> authorities, byte[] fullResponse) {
-        // TODO: Extract all NS server names from authority section
-        // Return list of server domain names
-        return null;
+// TODO: LAISHA Implement this method to find IP address for a given domain name in Additional section
+public static String findIPInAdditional(String domainName, List<ResourceRecord> additionals) {
+    // Search for an A record (type 1) with a matching name
+    for (ResourceRecord rr : additionals) {
+        if (rr.type == 1 && domainName.equalsIgnoreCase(rr.name)) {
+            return parseIPAddress(rr.rdata);
+        }
     }
+    return null; // Not found
+}
 
-    // TODO: LAISHA Implement this method to find the next DNS server to query
-    public static String selectNextServer(List<String> nsServers, List<ResourceRecord> additionals) {
-        // TODO: For each NS server, try to find its IP in additional section
-        // Return IP address of first available server, or null if none found
-        return null;
+// TODO: LAISHA Implement this method to extract NS server names from Authority section
+public static List<String> extractNSServers(List<ResourceRecord> authorities, byte[] fullResponse) {
+    List<String> nsServers = new ArrayList<>();
+    for (ResourceRecord rr : authorities) {
+        if (rr.type == 2) { // NS record (type 2)
+            String nsName = parseNSRecord(rr.rdata, fullResponse);
+            nsServers.add(nsName);
+        }
     }
+    return nsServers;
+}
+
+// TODO: LAISHA Implement this method to find the next DNS server to query
+public static String selectNextServer(List<String> nsServers, List<ResourceRecord> additionals) {
+    // Try each NS server in order; return the first one with a glue A record
+    for (String server : nsServers) {
+        String ip = findIPInAdditional(server, additionals);
+        if (ip != null) {
+            return ip;
+        }
+    }
+    return null; // No usable IP found
+}
 
     // parse DNS response
     public static DNSResponse parseResponse(byte[] response) {
@@ -321,12 +381,17 @@ public class mydns {
             // Update index after parsing
         }
         
-        // TODO: LAISHA  Parse Authority section  
-        if (dnsResponse.nscount > 0) {
-            System.out.println("Authority section:");
-            // dnsResponse.authorities = parseResourceRecords(index, dnsResponse.nscount, response);
-            // Update index after parsing
-        }
+        // TODO: LAISHA - Parse Authority section  
+    if (dnsResponse.nscount > 0) {
+        System.out.println("Authority section:");
+        // Parse the Authority section resource records
+        dnsResponse.authorities = parseResourceRecords(index, dnsResponse.nscount, response);
+    
+    // Update index to point after the last Authority record
+    // Note: parseResourceRecords must return or allow calculation of new index
+    // Since it doesn't return index, we estimate using a helper (see below)
+        index = advanceIndexAfterRecords(index, dnsResponse.nscount, response);
+    }
         
         // TODO: HAFSAH Parse Additional section
         if (dnsResponse.arcount > 0) {
